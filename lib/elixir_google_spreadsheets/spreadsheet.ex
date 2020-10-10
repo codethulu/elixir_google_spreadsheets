@@ -31,7 +31,11 @@ defmodule GSS.Spreadsheet do
 
   @spec init({String.t(), Keyword.t()}) :: {:ok, state}
   def init({spreadsheet_id, opts}) do
-    {:ok, %{spreadsheet_id: spreadsheet_id, list_name: Keyword.get(opts, :list_name)}}
+    {:ok, %{spreadsheet_id: spreadsheet_id,
+            list_name: Keyword.get(opts, :list_name),
+            sheet: :nil
+           }
+    }
   end
 
   @doc """
@@ -108,6 +112,10 @@ defmodule GSS.Spreadsheet do
   @spec append_row(pid, integer(), spreadsheet_data, Keyword.t()) :: :ok
   def append_row(pid, row_index, [cell | _] = column_list, options \\ []) when is_binary(cell) or is_nil(cell) do
     gen_server_call(pid, {:append_rows, row_index, [column_list], options}, options)
+  end
+
+  def select_sheet(pid, sheet, options \\ []) do
+    gen_server_call(pid, {:select_sheet, sheet}, options)
   end
 
   @doc """
@@ -357,16 +365,20 @@ defmodule GSS.Spreadsheet do
     column_to = Keyword.get(options, :column_to, column_from + write_cells_count - 1)
     range = range(row_index, row_max_index, column_from, column_to, state)
 
-    query =
-      "#{spreadsheet_id}/values/#{range}:append" <>
-        "?valueInputOption=#{value_input_option}&insertDataOption=#{insert_data_option}"
+    range = case state.sheet do
+      :nil -> range
+      s -> "#{s}!#{range}"
+    end
+
+    query = "#{spreadsheet_id}/values/#{range}:append" <>
+            "?valueInputOption=#{value_input_option}&insertDataOption=#{insert_data_option}"
 
     case spreadsheet_query(
-           :post,
-           query,
-           column_lists,
-           options ++ [range: range, wrap_data: false]
-         ) do
+       :post,
+       query,
+       column_lists,
+       options ++ [range: range, wrap_data: false]
+     ) do
       {:json,
        %{
          "updates" => %{
@@ -381,6 +393,51 @@ defmodule GSS.Spreadsheet do
         {:reply, {:error, exception}, state}
     end
   end
+
+  def handle_call({:select_sheet, sheet}, _from, state) do
+    {:reply, :ok, %{state | sheet: sheet}}
+  end
+
+  def handle_call(
+        {:append_rows, row_index, sheet, column_lists, options},
+        _from,
+        %{spreadsheet_id: spreadsheet_id} = state
+      ) do
+    value_input_option = Keyword.get(options, :value_input_option, "USER_ENTERED")
+    insert_data_option = Keyword.get(options, :insert_data_option, "INSERT_ROWS")
+
+    write_cells_count = Enum.map(column_lists, &Kernel.length/1) |> Enum.max()
+    row_count = length(column_lists)
+    row_max_index = row_index + row_count - 1
+    column_from = Keyword.get(options, :column_from, 1)
+    column_to = Keyword.get(options, :column_to, column_from + write_cells_count - 1)
+    range = range(row_index, row_max_index, column_from, column_to, state)
+
+    query =
+      "#{spreadsheet_id}/values/#{sheet}!#{range}:append" <>
+      "?valueInputOption=#{value_input_option}&insertDataOption=#{insert_data_option}"
+
+    case spreadsheet_query(
+           :post,
+           query,
+           column_lists,
+           options ++ [range: range, wrap_data: false]
+         ) do
+      {:json,
+        %{
+          "updates" => %{
+            "updatedRows" => updated_rows,
+            "updatedColumns" => updated_columns
+          }
+        }}
+      when updated_columns > 0 and updated_rows > 0 ->
+        {:reply, :ok, state}
+
+      {:error, exception} ->
+        {:reply, {:error, exception}, state}
+    end
+  end
+
 
   @doc """
   Clear rows in spreadsheet by their index.
